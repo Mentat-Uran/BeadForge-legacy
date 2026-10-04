@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'BeadForge.html'), 'utf8');
-const remoteCssImportPattern = /@import\s+(?:url\(\s*)?['"]?(?:https?:)?\/\//i;
+const cssImportPattern = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)|"([^"]*)"|'([^']*)')/gi;
 
 function stripCssComments(css) {
   let result = '';
@@ -63,7 +63,20 @@ function decodeCssEscapes(css) {
 
 function hasRemoteCssImport(css) {
   const normalized = decodeCssEscapes(stripCssComments(css));
-  return remoteCssImportPattern.test(normalized);
+  return [...normalized.matchAll(cssImportPattern)].some((match) => {
+    const reference = match.slice(1).find((value) => value !== undefined)?.trim();
+    if (!reference) return false;
+
+    try {
+      const base = reference.startsWith('//')
+        ? 'https://offline-audit.invalid/'
+        : 'file:///offline-audit/BeadForge.html';
+      const parsed = new URL(reference, base);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  });
 }
 
 function parseAttributes(source) {
@@ -108,43 +121,38 @@ function findLinkAttributeSources(document) {
   return sources;
 }
 
-function isRemoteStylesheetUrl(reference) {
-  const normalizedReference = reference.trim();
-  const hasScheme = /^[a-z][a-z\d+.-]*:/i.test(normalizedReference);
-  const isProtocolRelative = normalizedReference.startsWith('//');
-  if (!hasScheme && !isProtocolRelative) return false;
-
-  try {
-    const base = isProtocolRelative
-      ? 'https://offline-audit.invalid/'
-      : 'file:///offline-audit/BeadForge.html';
-    const parsed = new URL(normalizedReference, base);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function hasRemoteStylesheetLink(document) {
+function hasStylesheetLink(document) {
   return findLinkAttributeSources(document).some((source) => {
     const attributes = parseAttributes(source);
     const relTokens = (attributes.get('rel') ?? '').toLowerCase().split(/\s+/);
-    const href = (attributes.get('href') ?? '').trim();
-
-    return relTokens.includes('stylesheet') && isRemoteStylesheetUrl(href);
+    return relTokens.includes('stylesheet');
   });
 }
 
-test('the editor does not load stylesheets from remote hosts', () => {
-  const styleBlocks = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
+function hasRemoteCssImportInStyleBlocks(document) {
+  const styleBlocks = [...document.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)]
     .map((match) => match[1]);
 
-  assert.equal(styleBlocks.some(hasRemoteCssImport), false);
-  assert.equal(hasRemoteStylesheetLink(html), false);
+  return styleBlocks.some(hasRemoteCssImport);
+}
+
+function hasOfflineStylesheetViolation(document) {
+  return hasStylesheetLink(document) || hasRemoteCssImportInStyleBlocks(document);
+}
+
+test('the single-file editor has no stylesheet links or remote CSS imports', () => {
+  assert.equal(hasOfflineStylesheetViolation(html), false);
 });
 
 test('detects protocol-relative remote CSS imports', () => {
   assert.equal(hasRemoteCssImport("@import url('//cdn.example/style.css');"), true);
+});
+
+test('detects slashless HTTP CSS imports resolved against a local file', () => {
+  assert.equal(hasRemoteCssImport('@import "https:cdn.example/style.css";'), true);
+  assert.equal(hasRemoteCssImport(' @import url(https:/cdn.example/style.css);'), true);
+  assert.equal(hasRemoteCssImport('@import "./theme.css";'), false);
+  assert.equal(hasRemoteCssImport('@import "/theme.css";'), false);
 });
 
 test('detects remote CSS imports when comments separate the at-rule and URL', () => {
@@ -162,52 +170,48 @@ test('detects remote CSS imports whose URL scheme uses CSS escapes', () => {
   );
 });
 
-test('detects remote stylesheet links with valid whitespace around attributes', () => {
+test('rejects stylesheet links regardless of the href or its encoding', () => {
   assert.equal(
-    hasRemoteStylesheetLink('<link rel = "stylesheet" href = "https://cdn.example/style.css">'),
+    hasStylesheetLink('<link rel = "stylesheet" href = "https://cdn.example/style.css">'),
     true,
   );
   assert.equal(
-    hasRemoteStylesheetLink('<link rel = "stylesheet" href = "//cdn.example/style.css">'),
+    hasStylesheetLink('<link rel = "stylesheet" href = "//cdn.example/style.css">'),
     true,
   );
-  assert.equal(hasRemoteStylesheetLink('<link rel="stylesheet" href="./styles.css">'), false);
+  assert.equal(hasStylesheetLink('<link rel="stylesheet" href="./styles.css">'), true);
+  assert.equal(
+    hasStylesheetLink('<link rel="stylesheet" href="https&#58;//cdn.example/style.css">'),
+    true,
+  );
+  assert.equal(hasStylesheetLink('<link rel="icon" href="https://cdn.example/icon.png">'), false);
 });
 
-test('detects remote stylesheet links when quoted attributes contain a greater-than sign', () => {
+test('finds stylesheet links when quoted attributes contain a greater-than sign', () => {
   assert.equal(
-    hasRemoteStylesheetLink(
+    hasStylesheetLink(
       '<link rel="stylesheet" title="A > B" href="https://cdn.example/style.css">',
     ),
     true,
   );
 });
 
-test('detects HTTP stylesheet links with special-scheme URL forms', () => {
+test('finds remote CSS imports before valid spaced style end tags', () => {
   assert.equal(
-    hasRemoteStylesheetLink('<link rel="stylesheet" href="https:cdn.example/style.css">'),
+    hasRemoteCssImportInStyleBlocks('<style>@import "https://cdn.example/style.css";</style >'),
     true,
-  );
-  assert.equal(
-    hasRemoteStylesheetLink('<link rel="stylesheet" href="https:/cdn.example/style.css">'),
-    true,
-  );
-  assert.equal(hasRemoteStylesheetLink('<link rel="stylesheet" href="/styles.css">'), false);
-  assert.equal(
-    hasRemoteStylesheetLink('<link rel="stylesheet" href="data:text/css,body%7B%7D">'),
-    false,
   );
 });
 
 test('detects stylesheet anywhere in the link rel token list', () => {
   assert.equal(
-    hasRemoteStylesheetLink(
+    hasStylesheetLink(
       '<link rel="alternate stylesheet" title="Night" href="https://cdn.example/style.css">',
     ),
     true,
   );
   assert.equal(
-    hasRemoteStylesheetLink('<link rel="alternate" href="https://cdn.example/feed.xml">'),
+    hasStylesheetLink('<link rel="alternate" href="https://cdn.example/feed.xml">'),
     false,
   );
 });
