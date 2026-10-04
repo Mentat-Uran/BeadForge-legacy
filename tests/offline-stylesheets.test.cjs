@@ -115,7 +115,10 @@ function isRemoteStylesheetUrl(reference) {
   if (!hasScheme && !isProtocolRelative) return false;
 
   try {
-    const parsed = new URL(normalizedReference, 'https://offline-audit.invalid/');
+    const base = isProtocolRelative
+      ? 'https://offline-audit.invalid/'
+      : 'file:///offline-audit/BeadForge.html';
+    const parsed = new URL(normalizedReference, base);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {
     return false;
