@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Check offline stylesheet references
+        run: node --test tests/offline-stylesheets.test.cjs
+
       - name: Check embedded JavaScript syntax
         run: |
           node --input-type=module <<'NODE'
