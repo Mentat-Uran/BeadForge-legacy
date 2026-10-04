@@ -4,7 +4,12 @@ const path = require('node:path');
 const test = require('node:test');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'BeadForge.html'), 'utf8');
-const remoteCssImport = /@import\s+(?:url\(\s*)?['"]?(?:https?:)?\/\//i;
+const remoteCssImportPattern = /@import\s+(?:url\(\s*)?['"]?(?:https?:)?\/\//i;
+
+function hasRemoteCssImport(css) {
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  return remoteCssImportPattern.test(withoutComments);
+}
 
 function parseAttributes(source) {
   const attributes = new Map();
@@ -32,12 +37,20 @@ test('the editor does not load stylesheets from remote hosts', () => {
   const styleBlocks = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
     .map((match) => match[1]);
 
-  assert.equal(styleBlocks.some((style) => remoteCssImport.test(style)), false);
+  assert.equal(styleBlocks.some(hasRemoteCssImport), false);
   assert.equal(hasRemoteStylesheetLink(html), false);
 });
 
 test('detects protocol-relative remote CSS imports', () => {
-  assert.equal(remoteCssImport.test("@import url('//cdn.example/style.css');"), true);
+  assert.equal(hasRemoteCssImport("@import url('//cdn.example/style.css');"), true);
+});
+
+test('detects remote CSS imports when comments separate the at-rule and URL', () => {
+  assert.equal(
+    hasRemoteCssImport('@import /* typography */ url("https://cdn.example/style.css");'),
+    true,
+  );
+  assert.equal(hasRemoteCssImport('/* @import url("https://cdn.example/style.css"); */'), false);
 });
 
 test('detects remote stylesheet links with valid whitespace around attributes', () => {
